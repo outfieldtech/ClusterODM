@@ -3,6 +3,7 @@ const AbstractASRProvider = require('../classes/AbstractASRProvider');
 const logger = require('../logger');
 const short = require('short-uuid');
 const Node = require('../classes/Node');
+const S3 = require('../S3');
 
 module.exports = class KubernetesAsrProvider extends AbstractASRProvider {
     constructor(userConfig) {
@@ -28,8 +29,8 @@ module.exports = class KubernetesAsrProvider extends AbstractASRProvider {
         return this.getConfig("maxUploadTime");
     }
 
-    getDownloadsBaseUrl() {
-        return "http://example.com/downloads"; // TODO
+    getDownloadsBaseUrl(){
+        return `https://${this.getConfig("s3.bucket")}.${this.getConfig("s3.endpoint")}`;
     }
 
     getMachinesLimit(){
@@ -41,6 +42,12 @@ module.exports = class KubernetesAsrProvider extends AbstractASRProvider {
     }
 
     async initialize() {
+        this.validateConfigKeys(["accessKey", "secretKey", "s3.endpoint", "s3.bucket", "s3.acl", "securityGroup"]);
+        
+        // Test S3
+        const { endpoint, bucket } = this.getConfig("s3");
+        await S3.testBucket(this.getConfig("accessKey"), this.getConfig("secretKey"), endpoint, bucket);
+
         logger.info("Kubernetes ASR Provider initialized.");
     }
 
@@ -54,6 +61,10 @@ module.exports = class KubernetesAsrProvider extends AbstractASRProvider {
     
         const podName = this.generateHostname(imagesCount);
         const nodeToken = short.generate();
+        const accessKey = this.getConfig("accessKey");
+        const secretKey = this.getConfig("secretKey");
+        const s3 = this.getConfig("s3");
+
         const podManifest = {
             metadata: {
                 name: podName,
@@ -66,7 +77,15 @@ module.exports = class KubernetesAsrProvider extends AbstractASRProvider {
                     resources: {
                         requests: { cpu: '2', memory: '4Gi' },
                         limits: { cpu: '2', memory: '4Gi' } // TODO: dynamically adjust based on nb images
-                    }
+                    },
+                    args: [
+                        '--s3_access_key', accessKey,
+                        '--s3_secret_key', secretKey,
+                        '--s3_endpoint', s3.endpoint,
+                        '--s3_bucket', s3.bucket,
+                        '--s3_acl', s3.acl,
+                        '--token', nodeToken,
+                    ],
                 }]
             }
         };
