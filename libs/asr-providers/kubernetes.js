@@ -100,18 +100,19 @@ module.exports = class KubernetesAsrProvider extends AbstractASRProvider {
             // Wait for the pod to be ready and get its IP address
             let podIp = null;
             let retries = 0;
-            const maxRetries = 30; // Maximum number of retries
+            const maxRetries = 60; // Maximum number of retries - allow 5 mins for machine to scale up
             while (!podIp && retries < maxRetries) {
                 const pod = await this.coreV1Api.readNamespacedPod(podName, this.getNamespace());
                 podIp = pod.body.status.podIP;
                 if (!podIp) {
                     logger.info(`Waiting for pod ${podName} to get an IP address...`);
-                    await new Promise(resolve => setTimeout(resolve, 2000)); // Wait 2 seconds
+                    await new Promise(resolve => setTimeout(resolve, 5000)); // Wait 5 seconds
                     retries++;
                 }
             }
     
             if (!podIp) {
+                await this.coreV1Api.deleteNamespacedPod(podName, this.getNamespace()); // Prevent hanging pod
                 throw new Error(`Pod ${podName} failed to obtain an IP address after ${maxRetries} retries.`);
             }
     
