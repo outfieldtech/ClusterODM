@@ -4,6 +4,7 @@ const logger = require('../logger');
 const short = require('short-uuid');
 const Node = require('../classes/Node');
 const S3 = require('../S3');
+const nodes = require('../nodes');
 
 module.exports = class KubernetesAsrProvider extends AbstractASRProvider {
     constructor(userConfig) {
@@ -38,7 +39,52 @@ module.exports = class KubernetesAsrProvider extends AbstractASRProvider {
     }
 
     getNamespace(){
-        return this.getConfig("namespace", "default");
+        return this.getConfig("namespace", "clusterodm");
+    }
+
+    async waitForRefPod() {
+        const namespace = this.getNamespace();
+        let podIp = null;
+        let retries = 0;
+        const maxRetries = 60; // Maximum number of retries
+        const expectedLabel = 'nodeodm-reference';
+    
+        while (!podIp && retries < maxRetries) {
+            try {
+                // Fetch all pods in the namespace
+                const response = await this.coreV1Api.listNamespacedPod(namespace);
+                const pods = response.body.items;
+    
+                // Filter pods based on the expected label
+                const filteredPods = pods.filter(pod => {
+                    const labels = pod.metadata.labels || {};
+                    return labels.app === expectedLabel;
+                });
+    
+                for (const pod of filteredPods) {
+                    if (pod.status.phase === 'Running' && pod.status.podIP) {
+                        podIp = pod.status.podIP;
+                        break;
+                    }
+                }
+    
+                if (!podIp) {
+                    logger.info(`Waiting for pod with label app=${expectedLabel} to become available...`);
+                    await new Promise(resolve => setTimeout(resolve, 5000)); // Wait 5 seconds
+                    retries++;
+                }
+            } catch (error) {
+                logger.error(`Error while waiting for pod with label app=${expectedLabel}:`, error);
+                throw error;
+            }
+        }
+    
+        if (!podIp) {
+            throw new Error(`Pod with label app=${expectedLabel} failed to become available after ${maxRetries} retries.`);
+        }
+    
+        logger.info(`Pod with label app=${expectedLabel} has IP address ${podIp}.`);
+        return podIp;
     }
 
     async initialize() {
@@ -47,6 +93,19 @@ module.exports = class KubernetesAsrProvider extends AbstractASRProvider {
         // Test S3
         const { endpoint, bucket } = this.getConfig("s3");
         await S3.testBucket(this.getConfig("accessKey"), this.getConfig("secretKey"), endpoint, bucket);
+
+        // Wait for reference pod to come online
+        const hostname = await this.waitForRefPod();
+
+        // Register reference node & lock
+        const node = nodes.addUnique(hostname, 3000, "");
+        if (node) {
+            node.updateInfo();
+            logger.info(`Node registered: ${hostname}:3000`);
+        } else {
+            logger.error(`Failed to register node: ${hostname}:${port}`);
+        }
+        nodes.lock(node);
 
         logger.info("Kubernetes ASR Provider initialized.");
     }
@@ -68,15 +127,28 @@ module.exports = class KubernetesAsrProvider extends AbstractASRProvider {
         const podManifest = {
             metadata: {
                 name: podName,
-                labels: { app: 'clusterodm' }
+                labels: {
+                    app: 'clusterodm',
+                    'kueue.x-k8s.io/queue-name': 'odm-queue',
+                    'kueue-job': 'true',
+                }
             },
             spec: {
+                nodeSelector: {
+                    node_pool: 'odm-node-pool'
+                },
+                tolerations: [{
+                    key: "odm",
+                    operator: "Equal",
+                    value: "true",
+                    effect: "NoSchedule"
+                }],
                 containers: [{
                     name: 'nodeodm',
                     image: this.getConfig('dockerImage', 'opendronemap/nodeodm'),
                     resources: {
-                        requests: { cpu: '2', memory: '4Gi' },
-                        limits: { cpu: '2', memory: '4Gi' } // TODO: dynamically adjust based on nb images
+                        requests: { cpu: '3500m', memory: '12Gi' },
+                        limits: { cpu: '3500m', memory: '12Gi' } // TODO: dynamically adjust based on nb images
                     },
                     args: [
                         '--s3_access_key', accessKey,
@@ -107,13 +179,14 @@ module.exports = class KubernetesAsrProvider extends AbstractASRProvider {
                 if (!podIp) {
                     logger.info(`Waiting for pod ${podName} to get an IP address...`);
                     await new Promise(resolve => setTimeout(resolve, 5000)); // Wait 5 seconds
-                    retries++;
+                    // retries++;
                 }
+                // TODO: check for pod create errors
             }
     
             if (!podIp) {
                 await this.coreV1Api.deleteNamespacedPod(podName, this.getNamespace()); // Prevent hanging pod
-                throw new Error(`Pod ${podName} failed to obtain an IP address after ${maxRetries} retries.`);
+                throw new Error(`Pod ${podName} failed to obtain an IP address after`);// ${maxRetries} retries.`);
             }
     
             logger.info(`Pod ${podName} has IP address ${podIp}.`);
